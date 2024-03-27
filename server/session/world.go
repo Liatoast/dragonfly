@@ -195,7 +195,7 @@ func (s *Session) HideEntity(e world.Entity) {
 }
 
 // ViewEntityMovement ...
-func (s *Session) ViewEntityMovement(e world.Entity, pos mgl64.Vec3, yaw, pitch float64, onGround bool) {
+func (s *Session) ViewEntityMovement(e world.Entity, pos mgl64.Vec3, rot cube.Rotation, onGround bool) {
 	id := s.entityRuntimeID(e)
 	if id == selfEntityRuntimeID || s.entityHidden(e) {
 		return
@@ -208,7 +208,7 @@ func (s *Session) ViewEntityMovement(e world.Entity, pos mgl64.Vec3, yaw, pitch 
 	s.writePacket(&packet.MoveActorAbsolute{
 		EntityRuntimeID: id,
 		Position:        vec64To32(pos.Add(entityOffset(e))),
-		Rotation:        vec64To32(mgl64.Vec3{pitch, yaw, yaw}),
+		Rotation:        vec64To32(mgl64.Vec3{rot.Pitch(), rot.Yaw(), rot.Yaw()}),
 		Flags:           flags,
 	})
 }
@@ -662,6 +662,10 @@ func (s *Session) playSound(pos mgl64.Vec3, t world.Sound, disableRelative bool)
 		pk.SoundType = packet.SoundEventChestClosed
 	case sound.ChestOpen:
 		pk.SoundType = packet.SoundEventChestOpen
+	case sound.EnderChestClose:
+		pk.SoundType = packet.SoundEventEnderChestClosed
+	case sound.EnderChestOpen:
+		pk.SoundType = packet.SoundEventEnderChestOpen
 	case sound.BarrelClose:
 		pk.SoundType = packet.SoundEventBarrelClose
 	case sound.BarrelOpen:
@@ -739,6 +743,8 @@ func (s *Session) playSound(pos mgl64.Vec3, t world.Sound, disableRelative bool)
 			pk.SoundType = packet.SoundEventRecordPigstep
 		case sound.Disc5():
 			pk.SoundType = packet.SoundEventRecord5
+		case sound.DiscRelic():
+			pk.SoundType = packet.SoundEventRecordRelic
 		}
 	case sound.MusicDiscEnd:
 		pk.SoundType = packet.SoundEventRecordNull
@@ -756,6 +762,8 @@ func (s *Session) playSound(pos mgl64.Vec3, t world.Sound, disableRelative bool)
 		pk.SoundType = packet.SoundEventComposterFillLayer
 	case sound.ComposterReady:
 		pk.SoundType = packet.SoundEventComposterReady
+	case sound.LecternBookPlace:
+		pk.SoundType = packet.SoundEventLecternBookPlace
 	}
 	s.writePacket(pk)
 }
@@ -772,6 +780,15 @@ func (s *Session) PlaySound(t world.Sound) {
 // ViewSound ...
 func (s *Session) ViewSound(pos mgl64.Vec3, soundType world.Sound) {
 	s.playSound(pos, soundType, false)
+}
+
+// OpenSign ...
+func (s *Session) OpenSign(pos cube.Pos, frontSide bool) {
+	blockPos := protocol.BlockPos{int32(pos[0]), int32(pos[1]), int32(pos[2])}
+	s.writePacket(&packet.OpenSign{
+		Position:  blockPos,
+		FrontSide: frontSide,
+	})
 }
 
 // ViewFurnaceUpdate updates a furnace for the associated session based on previous times.
@@ -898,6 +915,16 @@ func (s *Session) ViewEntityState(e world.Entity) {
 	s.writePacket(&packet.SetActorData{
 		EntityRuntimeID: s.entityRuntimeID(e),
 		EntityMetadata:  s.parseEntityMetadata(e),
+	})
+}
+
+// ViewEntityAnimation ...
+func (s *Session) ViewEntityAnimation(e world.Entity, animationName string) {
+	s.writePacket(&packet.AnimateEntity{
+		Animation: animationName,
+		EntityRuntimeIDs: []uint64{
+			s.entityRuntimeID(e),
+		},
 	})
 }
 
@@ -1132,6 +1159,11 @@ func vec32To64(vec3 mgl32.Vec3) mgl64.Vec3 {
 // vec64To32 converts a mgl64.Vec3 to a mgl32.Vec3.
 func vec64To32(vec3 mgl64.Vec3) mgl32.Vec3 {
 	return mgl32.Vec3{float32(vec3[0]), float32(vec3[1]), float32(vec3[2])}
+}
+
+// blockPosFromProtocol ...
+func blockPosFromProtocol(pos protocol.BlockPos) cube.Pos {
+	return cube.Pos{int(pos.X()), int(pos.Y()), int(pos.Z())}
 }
 
 // boolByte returns 1 if the bool passed is true, or 0 if it is false.

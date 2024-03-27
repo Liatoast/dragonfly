@@ -45,6 +45,12 @@ type ChestOpen struct{ sound }
 // ChestClose is played when a chest is closed.
 type ChestClose struct{ sound }
 
+// EnderChestOpen is played when a ender chest is opened.
+type EnderChestOpen struct{ sound }
+
+// EnderChestClose is played when a ender chest is closed.
+type EnderChestClose struct{ sound }
+
 // BarrelOpen is played when a barrel is opened.
 type BarrelOpen struct{ sound }
 
@@ -172,6 +178,9 @@ type ComposterFillLayer struct{ sound }
 
 // ComposterReady is a sound played when a composter has produced bone meal and is ready to be collected.
 type ComposterReady struct{ sound }
+
+// LecternBookPlace is a sound played when a book is placed in a lectern.
+type LecternBookPlace struct{ sound }
 
 // sound implements the world.Sound interface.
 type sound struct{}

@@ -84,8 +84,8 @@ type Player struct {
 	experience *entity.ExperienceManager
 	effects    *entity.EffectManager
 
-	lastXPPickup atomic.Value[time.Time]
-	immunity     atomic.Value[time.Time]
+	lastXPPickup  atomic.Value[time.Time]
+	immunityTicks atomic.Int64
 
 	deathMu        sync.Mutex
 	deathPos       *mgl64.Vec3
@@ -138,7 +138,6 @@ func New(name string, skin skin.Skin, pos mgl64.Vec3) *Player {
 		maxAirSupplyTicks: *atomic.NewInt64(300),
 		enchantSeed:       *atomic.NewInt64(rand.Int63()),
 		scale:             *atomic.NewFloat64(1),
-		immunity:          *atomic.NewValue(time.Now()),
 		pos:               *atomic.NewValue(pos),
 		cooldowns:         make(map[string]time.Time),
 		mc:                &entity.MovementComputer{Gravity: 0.08, Drag: 0.02, DragBeforeGravity: true},
@@ -600,7 +599,10 @@ func (p *Player) Hurt(dmg float64, src world.DamageSource) (float64, bool) {
 			origin = s.Owner
 		}
 		if l, ok := origin.(entity.Living); ok {
-			l.Hurt(p.Armour().ThornsDamage(p.damageItem), enchantment.ThornsDamageSource{Owner: p})
+			thornsDmg := p.Armour().ThornsDamage(p.damageItem)
+			if thornsDmg > 0 {
+				l.Hurt(thornsDmg, enchantment.ThornsDamageSource{Owner: p})
+			}
 		}
 	}
 
@@ -614,7 +616,7 @@ func (p *Player) Hurt(dmg float64, src world.DamageSource) (float64, bool) {
 		w.PlaySound(pos, sound.Drowning{})
 	}
 
-	p.immunity.Store(time.Now().Add(immunity))
+	p.SetAttackImmunity(immunity)
 	if p.Dead() {
 		p.kill(src)
 	}
@@ -672,7 +674,9 @@ func (p *Player) knockBack(src mgl64.Vec3, force, height float64) {
 	velocity := p.Position().Sub(src)
 	velocity[1] = 0
 
-	velocity = velocity.Normalize().Mul(force)
+	if velocity.Len() != 0 {
+		velocity = velocity.Normalize().Mul(force)
+	}
 	velocity[1] = height
 
 	p.SetVelocity(velocity.Mul(1 - p.Armour().KnockBackResistance()))
@@ -680,17 +684,17 @@ func (p *Player) knockBack(src mgl64.Vec3, force, height float64) {
 
 // AttackImmune checks if the player is currently immune to entity attacks, meaning it was recently attacked.
 func (p *Player) AttackImmune() bool {
-	return p.immunity.Load().After(time.Now())
+	return p.immunityTicks.Load() > 0
 }
 
 // AttackImmunity returns the duration the player is immune to entity attacks.
 func (p *Player) AttackImmunity() time.Duration {
-	return time.Until(p.immunity.Load())
+	return time.Duration(p.immunityTicks.Load()) * time.Second / 20
 }
 
 // SetAttackImmunity sets the duration the player is immune to entity attacks.
 func (p *Player) SetAttackImmunity(d time.Duration) {
-	p.immunity.Store(time.Now().Add(d))
+	p.immunityTicks.Store(d.Milliseconds() / 50)
 }
 
 // Food returns the current food level of a player. The level returned is guaranteed to always be between 0
@@ -1928,7 +1932,7 @@ func (p *Player) Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64) {
 		return
 	}
 	for _, v := range p.viewers() {
-		v.ViewEntityMovement(p, res, resYaw, resPitch, p.OnGround())
+		v.ViewEntityMovement(p, res, cube.Rotation{resYaw, resPitch}, p.OnGround())
 	}
 
 	p.pos.Store(res)
@@ -2018,7 +2022,7 @@ func (p *Player) Collect(s item.Stack) int {
 		return 0
 	}
 	ctx := event.C()
-	if p.Handler().HandleItemPickup(ctx, s); ctx.Cancelled() {
+	if p.Handler().HandleItemPickup(ctx, &s); ctx.Cancelled() {
 		return 0
 	}
 	n, _ := p.Inventory().AddItem(s)
@@ -2233,6 +2237,9 @@ func (p *Player) Tick(w *world.World, current int64) {
 
 	p.tickFood(w)
 	p.tickAirSupply(w)
+	if p.immunityTicks.Load() > 0 {
+		p.immunityTicks.Dec()
+	}
 	if p.Position()[1] < float64(w.Range()[0]) && p.GameMode().AllowsTakingDamage() && current%10 == 0 {
 		p.Hurt(4, entity.VoidDamageSource{})
 	}
@@ -2269,7 +2276,7 @@ func (p *Player) Tick(w *world.World, current int64) {
 	p.cooldownMu.Unlock()
 
 	if p.session() == session.Nop && !p.Immobile() {
-		m := p.mc.TickMovement(p, p.Position(), p.Velocity(), p.yaw.Load(), p.pitch.Load())
+		m := p.mc.TickMovement(p, p.Position(), p.Velocity(), cube.Rotation{p.yaw.Load(), p.pitch.Load()})
 		m.Send()
 
 		p.vel.Store(m.Velocity())
@@ -2572,24 +2579,61 @@ func (p *Player) ShowParticle(pos mgl64.Vec3, particle world.Particle) {
 	p.session().ViewParticle(pos, particle)
 }
 
+// OpenSign makes the player open the sign at the cube.Pos passed, with the specific side provided. The client will not
+// show the interface if it is not aware of a sign at the position.
+func (p *Player) OpenSign(pos cube.Pos, frontSide bool) {
+	p.session().OpenSign(pos, frontSide)
+}
+
 // EditSign edits the sign at the cube.Pos passed and writes the text passed to a sign at that position. If no sign is
-// present or if the Player cannot edit it, an error is returned
-func (p *Player) EditSign(pos cube.Pos, text string) error {
+// present, an error is returned.
+func (p *Player) EditSign(pos cube.Pos, frontText, backText string) error {
 	w := p.World()
 	sign, ok := w.Block(pos).(block.Sign)
 	if !ok {
 		return fmt.Errorf("edit sign: no sign at position %v", pos)
 	}
-	if !sign.EditableBy(p) {
-		return fmt.Errorf("edit sign: sign text was already finalized")
+
+	if sign.Waxed {
+		return nil
+	} else if frontText == sign.Front.Text && backText == sign.Back.Text {
+		return nil
 	}
 
 	ctx := event.C()
-	if p.Handler().HandleSignEdit(ctx, sign.Text, text); ctx.Cancelled() {
+	if frontText != sign.Front.Text {
+		if p.Handler().HandleSignEdit(ctx, true, sign.Front.Text, frontText); ctx.Cancelled() {
+			return nil
+		}
+		sign.Front.Text = frontText
+		sign.Front.Owner = p.XUID()
+	} else {
+		if p.Handler().HandleSignEdit(ctx, false, sign.Back.Text, backText); ctx.Cancelled() {
+			return nil
+		}
+		sign.Back.Text = backText
+		sign.Back.Owner = p.XUID()
+	}
+	w.SetBlock(pos, sign, nil)
+	return nil
+}
+
+// TurnLecternPage edits the lectern at the cube.Pos passed by turning the page to the page passed. If no lectern is
+// present, an error is returned.
+func (p *Player) TurnLecternPage(pos cube.Pos, page int) error {
+	w := p.World()
+	lectern, ok := w.Block(pos).(block.Lectern)
+	if !ok {
+		return fmt.Errorf("edit lectern: no lectern at position %v", pos)
+	}
+
+	ctx := event.C()
+	if p.Handler().HandleLecternPageTurn(ctx, pos, lectern.Page, &page); ctx.Cancelled() {
 		return nil
 	}
-	sign.Text = text
-	w.SetBlock(pos, sign, nil)
+
+	lectern.Page = page
+	w.SetBlock(pos, lectern, nil)
 	return nil
 }
 
